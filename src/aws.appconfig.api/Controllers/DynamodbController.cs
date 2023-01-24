@@ -1,4 +1,6 @@
-﻿using Amazon.DynamoDBv2;
+﻿using Amazon.AppConfig;
+using Amazon.AppConfig.Model;
+using Amazon.DynamoDBv2;
 using Amazon.DynamoDBv2.Model;
 using aws.appconfig.core.Data.Models;
 using aws.appconfig.core.Helper;
@@ -11,13 +13,16 @@ namespace aws.appconfig.api.Controllers;
 public class DynamodbController : ControllerBase
 {
     private readonly IAmazonDynamoDB _amazonDynamoDB;
+    private readonly IAmazonAppConfig _amazonAppConfig;
 
-    public DynamodbController(IAmazonDynamoDB amazonDynamoDB)
+
+    public DynamodbController(IAmazonDynamoDB amazonDynamoDB,IAmazonAppConfig amazonAppConfig)
     {
         _amazonDynamoDB = amazonDynamoDB;
+        _amazonAppConfig= amazonAppConfig;
     }
 
-    #region get
+    #region Get
     [HttpPost("{tableName}/{apiKey}")]
     public async Task<IActionResult> GetItemAsync([FromRoute] string tableName, [FromRoute] string apiKey)
     {
@@ -41,11 +46,11 @@ public class DynamodbController : ControllerBase
         string clientName = orgName.Replace(" ", "_");
         string profileName = orgName.ConvertToProfileName(environment);
         string apiKey = Guid.NewGuid().ToString("N").ToUpper();
-        string tableName= "micr-"+ environment;
+        string tableName= "micr-"+ environment.ToLower();
         // Get org id from sf
         string orgId = "N/A";
 
-        // get billing scheme details from salesforce
+        // Get billing scheme details from salesforce
         string referrid = "N/A";
 
         var response = await _amazonDynamoDB.PutItemAsync(new PutItemRequest()
@@ -60,8 +65,55 @@ public class DynamodbController : ControllerBase
                 { nameof(TableDetails.ReferrerId), new AttributeValue() { S = referrid } },
             }
         });
+        var applicationLists = await _amazonAppConfig.ListApplicationsAsync(new ListApplicationsRequest()
+        {
+             MaxResults= 50,
+        });
+        var applicationId = applicationLists.Items.Where(x => x.Name=="Microservice").FirstOrDefault()?.Id;
+        
+        var envList = await _amazonAppConfig.ListEnvironmentsAsync(new ListEnvironmentsRequest()
+        {
+           ApplicationId= applicationId,
+          MaxResults= 50,
+        });
+        string? envId = envList.Items.Where(x=>x.Name==environment).FirstOrDefault()?.Id;
+        
+        var response2 = await _amazonAppConfig.CreateConfigurationProfileAsync(new CreateConfigurationProfileRequest()
+        {
+            Name = profileName,
+            Type = "AWS.Freeform",
+            ApplicationId = applicationId,
+            Description = "--demo-profile--",
+            LocationUri = "hosted",
+        });
+
+        string content = "{\"FirstName\":\"Keshav\",\"LastName\":\"Singh\",\"Branch\":\"CSE\",\"Batch\":\"B-1\",\"Country\":\"India\",\"State\":\"Raj\",\"District\":\"Dholpur\",\"Village\":\"Dharapura\",\"Post\":\"Khudila\"}";
+        await _amazonAppConfig.CreateHostedConfigurationVersionAsync(new CreateHostedConfigurationVersionRequest()
+        {
+             ApplicationId= applicationId,
+             ConfigurationProfileId= response2.Id,
+             ContentType= "application/json",
+             Content= content.ConvertToMemoryStream(),
+             LatestVersionNumber=1
+        });
+
+        var response4 = await _amazonAppConfig.ListDeploymentStrategiesAsync(new ListDeploymentStrategiesRequest() { MaxResults=50 });
+        string? deploymentId = response4.Items.Where(x=>x.Name== "MyTestDeploymentStrategy").FirstOrDefault()?.Id;
+
+        // Deploy the application
+        var response3 = await _amazonAppConfig.StartDeploymentAsync(new StartDeploymentRequest()
+        {
+             ApplicationId= applicationId,
+              ConfigurationProfileId=response2.Id,
+             ConfigurationVersion= "1",
+             DeploymentStrategyId=deploymentId,
+             EnvironmentId= envId,
+             Description="--------testing------",
+        });
 
         Response.StatusCode = (int)response.HttpStatusCode;
+
+
         return new ObjectResult(response);
     }
     #endregion
@@ -106,7 +158,5 @@ public class DynamodbController : ControllerBase
         Response.StatusCode = (int)response.HttpStatusCode;
         return new ObjectResult(response);
     }
-
-
     #endregion
 }
